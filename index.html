@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>RAI: Relationship Drive Interface v2</title>
+    <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --bg-color: #050505;
+            --accent: #00ccaa;
+            --accent-dim: rgba(0, 204, 170, 0.1);
+            --text-main: #e0e0e0;
+            --glass: rgba(10, 10, 10, 0.85);
+        }
+        body { 
+            background-color: var(--bg-color); color: var(--text-main); 
+            font-family: 'Shippori Mincho', serif; overflow: hidden; height: 100vh;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* スクロールバー */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #111; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        
+        /* スライダー */
+        input[type=range] {
+            -webkit-appearance: none; background: transparent; width: 100%; cursor: pointer;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 2px; background: #333;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; height: 14px; width: 14px; border-radius: 50%;
+            background: #888; margin-top: -6px; transition: 0.2s;
+        }
+        input[type=range]:active::-webkit-slider-thumb {
+            background: var(--accent); transform: scale(1.2);
+        }
+
+        /* アニメーション */
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+        
+        .pulse-text { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+<div id="app" class="relative w-full h-full flex flex-col"
+     @dragenter.prevent="isDragging = true">
+    
+    <!-- ★追加: ドラッグ中のオーバーレイ表示 (画面全体を覆うドロップ受け皿) -->
+    <div v-show="isDragging" 
+         class="fixed inset-0 z-[9999] bg-black/90 flex items-center justify-center backdrop-blur-sm"
+         @dragover.prevent 
+         @drop.prevent="handleDrop" 
+         @dragleave.prevent="isDragging = false">
+         
+        <!-- イベントを透過させるための pointer-events-none -->
+        <div class="pointer-events-none w-[90%] h-[90%] border-4 border-dashed border-[var(--accent)] rounded-xl flex flex-col items-center justify-center animate-pulse">
+            <div class="text-[var(--accent)] text-6xl mb-6">📂</div>
+            <div class="text-[var(--accent)] font-bold tracking-[0.5em] text-3xl uppercase">
+                DROP FILE HERE
+            </div>
+            <div class="text-white/70 text-sm mt-4 tracking-widest">
+                画像 (.jpg, .png) または テキスト (.txt, .md) をドロップ
+            </div>
+        </div>
+    </div>
+    
+    <!-- 背景エフェクト -->
+    <div class="fixed inset-0 pointer-events-none z-0" 
+         :style="{ background: bgGradient }"></div>
+
+    <!-- ヘッダー -->
+    <header class="z-10 flex justify-between items-center p-4 border-b border-white/10 bg-black/50 backdrop-blur-sm">
+        <div class="flex items-center gap-4">
+            <h1 class="text-xs font-bold tracking-[0.2em] text-gray-500">RAI INTERFACE <span class="text-[var(--accent)]">V2.0</span></h1>
+            <div class="h-3 w-[1px] bg-gray-700"></div>
+            <div class="text-[10px] mono text-gray-400">
+                MODEL: <span class="text-white">{{ status.model }}</span>
+            </div>
+        </div>
+        <div class="flex gap-4 text-[10px] mono text-gray-400">
+            <span>LOGS: {{ status.count }}</span>
+            <span>TOKENS: {{ status.tokens }}</span>
+        </div>
+    </header>
+
+    <!-- メインエリア -->
+    <main ref="scrollArea" class="flex-1 overflow-y-auto relative z-10 p-4 md:p-8">
+        <div class="max-w-3xl mx-auto space-y-8">
+            <!-- 履歴表示 -->
+            <div v-if="showFullHistory" v-for="(log, i) in history" :key="i" class="opacity-70 text-sm border-b border-white/5 pb-4">
+                <div class="text-[10px] text-gray-500 mb-1 mono">{{ log.timestamp }} [{{ log.role }}]</div>
+                <div class="leading-loose whitespace-pre-wrap font-sans">{{ log.text }}</div>
+            </div>
+
+            <div class="bg-black/40 border border-white/10 p-6 md:p-10 rounded shadow-2xl backdrop-blur-md mb-8">
+                
+                <!-- 画像表示 -->
+                <div v-if="imageBase64" class="mb-6 flex justify-center relative group">
+                    <img :src="imageBase64" class="max-h-40 border border-white/20 rounded opacity-80">
+                    <button @click="clearImage" class="absolute top-2 right-2 bg-black/80 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition">削除</button>
+                </div>
+
+                <!-- ★追加: テキストファイル読み込み表示 -->
+                <div v-if="importedText" class="mb-6 border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-4 rounded relative group">
+                    <div class="text-[10px] text-[var(--accent)] mb-1 font-bold">IMPORTED TEXT CONTEXT</div>
+                    <div class="text-xs text-gray-400 line-clamp-3 whitespace-pre-wrap">{{ importedText }}</div>
+                    <button @click="clearText" class="absolute top-2 right-2 bg-black/80 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition">削除</button>
+                </div>
+                
+                <!-- 出力テキスト -->
+                <div class="text-base md:text-lg leading-loose text-justify whitespace-pre-wrap font-medium tracking-wide" :class="{'text-gray-400': isProcessing}">
+                    {{ displayedText }}<span v-if="isTyping" class="text-[var(--accent)] animate-pulse">_</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ローディング -->
+    <div v-if="isProcessing" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 text-[var(--accent)] text-sm tracking-[0.3em] pulse-text font-bold bg-black/80 px-6 py-2 rounded">
+        OBSERVING...
+    </div>
+
+    <!-- フッター -->
+    <footer class="z-20 border-t border-white/10 bg-[var(--glass)] backdrop-blur-xl transition-all duration-300 relative" 
+            :class="minimized ? 'pb-2 pt-4' : 'pb-6 pt-4'">
+        
+        <div class="absolute -top-6 left-1/2 transform -translate-x-1/2 cursor-pointer py-2 px-4" @click="minimized = !minimized">
+            <div class="w-12 h-1 bg-white/40 rounded-full hover:bg-[var(--accent)] transition"></div>
+        </div>
+
+        <div class="max-w-4xl mx-auto">
+            <!-- スライダーグリッド -->
+            <div v-show="!minimized" class="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-x-2 gap-y-4 mb-6 transition-all">
+                <div v-for="(label, key) in sliderLabels" :key="key" class="flex flex-col items-center group">
+                    <label class="text-[10px] font-bold text-[var(--accent)] tracking-wider mb-2 group-hover:text-white transition whitespace-nowrap">{{ label.name }}</label>
+                    <input type="range" v-model.number="sliders[key]" min="0" max="1" step="0.01" class="w-full">
+                    <div class="w-full flex justify-between text-[8px] text-gray-500 px-1 mt-1">
+                        <span>{{ label.min }}</span>
+                        <span>{{ label.max }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- アクションボタン -->
+            <div class="flex flex-wrap justify-center gap-3">
+                <button @click="showSettings = true" class="px-3 py-1.5 text-[10px] border border-white/20 rounded hover:bg-white/10 transition">設定</button>
+                <button @click="toggleHistory" class="px-3 py-1.5 text-[10px] border border-white/20 rounded hover:bg-white/10 transition">履歴</button>
+                
+                <!-- ★修正: ファイル読込ボタン -->
+                <button @click="triggerImage" class="px-3 py-1.5 text-[10px] border border-white/20 rounded hover:bg-white/10 transition flex items-center gap-2">
+                    <span v-if="imageBase64 || importedText" class="w-1.5 h-1.5 bg-[var(--accent)] rounded-full"></span>
+                    ファイル読込
+                </button>
+                <!-- accept属性にテキストファイル等を追加 -->
+                <input type="file" ref="fileInput" @change="handleImage" class="hidden" accept="image/*, .txt, .md, .json">
+                
+                <button @click="resetHistory" class="px-3 py-1.5 text-[10px] border border-red-500/50 text-red-400 rounded hover:bg-red-500/10 transition">リセット</button>
+                
+                <button @click="generate" :disabled="isProcessing" 
+                        class="ml-2 px-6 py-1.5 text-xs bg-[var(--accent-dim)] border border-[var(--accent)] text-[var(--accent)] font-bold rounded hover:bg-[var(--accent)] hover:text-black transition">
+                    観測実行
+                </button>
+            </div>
+        </div>
+    </footer>
+
+    <!-- 設定モーダル (全項目を含む) -->
+    <div v-if="showSettings" class="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-[#111] border border-white/10 p-6 rounded w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <h3 class="text-[var(--accent)] text-sm font-bold border-b border-white/10 pb-2 mb-4">SCENARIO CONFIG</h3>
+            <div class="space-y-4">
+                <div><label class="text-xs text-gray-500 block mb-1">Character</label><textarea v-model="scenario.char" class="w-full bg-black border border-white/10 p-2 text-sm h-20 rounded focus:border-[var(--accent)] outline-none"></textarea></div>
+                <div><label class="text-xs text-gray-500 block mb-1">Relationship</label><textarea v-model="scenario.rel" class="w-full bg-black border border-white/10 p-2 text-sm h-20 rounded focus:border-[var(--accent)] outline-none"></textarea></div>
+                <div><label class="text-xs text-gray-500 block mb-1">Situation</label><textarea v-model="scenario.sit" class="w-full bg-black border border-white/10 p-2 text-sm h-20 rounded focus:border-[var(--accent)] outline-none"></textarea></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="text-xs text-gray-500 block mb-1">Me (One)</label><input v-model="scenario.me" class="w-full bg-black border border-white/10 p-2 text-sm rounded"></div>
+                    <div><label class="text-xs text-gray-500 block mb-1">You (User)</label><input v-model="scenario.you" class="w-full bg-black border border-white/10 p-2 text-sm rounded"></div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Mode</label>
+                    <select v-model="appMode" @change="updateConfig" class="w-full bg-black border border-white/10 p-2 text-sm rounded">
+                        <option value="api">API (AI Generation)</option>
+                        <option value="static">Static (Dictionary)</option>
+                    </select>
+                </div>
+            </div>
+            
+            <!-- 外部API設定エリア -->
+            <div class="mt-4 pt-4 border-t border-white/10 space-y-3">
+                <label class="text-xs text-[var(--accent)] font-bold block">外部API接続設定 (任意)</label>
+                <div>
+                    <label class="text-[10px] text-gray-500 block mb-1">Provider (接続先)</label>
+                    <select v-model="apiProvider" class="w-full bg-black border border-white/10 p-2 text-sm rounded text-white">
+                        <option value="openrouter">OpenRouter (Default)</option>
+                        <option value="openai">OpenAI (ChatGPT)</option>
+                        <option value="google">Google (Gemini)</option>
+                        <option value="groq">Groq</option>
+                        <option value="custom">Custom URL</option>
+                    </select>
+                </div>
+                <div v-if="apiProvider === 'custom'">
+                    <label class="text-[10px] text-gray-500 block mb-1">Base URL</label>
+                    <input type="text" v-model="customUrl" placeholder="https://..." class="w-full bg-black border border-white/10 p-2 text-sm rounded">
+                </div>
+                <div>
+                    <label class="text-[10px] text-gray-500 block mb-1">Model ID (例: gpt-4o, gemini-2.0-flash)</label>
+                    <input type="text" v-model="userModelId" placeholder="指定なし (OpenRouterの無料枠を自動探索)" class="w-full bg-black border border-white/10 p-2 text-sm rounded text-white">
+                </div>
+                <div>
+                    <label class="text-[10px] text-gray-500 block mb-1">API Key</label>
+                    <input type="password" v-model="userApiKey" placeholder="sk-..." class="w-full bg-black border border-white/10 p-2 text-sm rounded focus:border-[var(--accent)] outline-none text-white">
+                </div>
+            </div>
+
+            <!-- ブラウザデータ管理エリア -->
+            <div class="mt-6 pt-4 border-t border-white/10">
+                <label class="text-xs text-red-400 block mb-2">ブラウザ保存データの管理</label>
+                <div class="flex justify-between items-center">
+                    <span class="text-[10px] text-gray-500">スライダー値やシナリオ設定を初期化します</span>
+                    <button @click="clearLocalStorage" class="px-3 py-1.5 text-[10px] border border-red-500/50 text-red-400 rounded hover:bg-red-500/10 transition">
+                        設定を全削除
+                    </button>
+                </div>
+            </div>
+            
+            <div class="mt-6 text-right">
+                <button @click="showSettings = false" class="px-6 py-2 bg-white/10 hover:bg-white/20 rounded text-sm transition">閉じる</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- トースト -->
+    <div class="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        <transition-group name="fade">
+            <div v-for="t in toasts" :key="t.id" class="bg-gray-800 border-l-2 text-xs px-4 py-3 rounded shadow-lg text-white"
+                 :class="t.type === 'error' ? 'border-red-500' : 'border-[var(--accent)]'">
+                {{ t.msg }}
+            </div>
+        </transition-group>
+    </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script>
+    const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+
+    createApp({
+        setup() {
+            // --- State ---
+            const isProcessing = ref(false);
+            const isTyping = ref(false);
+            const displayedText = ref("");
+            const showSettings = ref(false);
+            const showFullHistory = ref(false);
+            const minimized = ref(false);
+            const imageBase64 = ref(null);
+            const appMode = ref("api");
+
+            const history = ref([]);
+            const toasts = ref([]);
+            
+            const status = reactive({ model: "-", count: 0, tokens: 0 });
+            const userApiKey = ref("");
+            const userModelId = ref("");
+            const apiProvider = ref("openrouter");
+            const customUrl = ref("");
+
+                        const isDragging = ref(false);
+            const importedText = ref(""); 
+
+            const sliders = reactive({
+                dist: 0.5,        // 距離感
+                temp: 0.2,        // 興奮度
+                asymmetry: 0.5,   // 主導権
+                purity: 1.0,      // 初心 (1.0=無垢 / 0.0=堕落)
+                habituation: 0.0, // 慣れ (0.0=過敏 / 1.0=麻痺)
+                pace: 0.5,        // 展開速度
+                length: 0.5,      // 文章量
+                memory: 0.5,      // 記憶深度
+                style: 0.5        // 描写傾向
+            });
+
+            // 表示用ラベルと厳密な定義
+            const sliderLabels = {
+                dist:        { name: "距離感",    min: "観察", max: "密着" },
+                temp:        { name: "興奮度",    min: "冷静", max: "陶酔" },
+                asymmetry:   { name: "主導権",    min: "支配", max: "従属" },
+                purity:      { name: "初心",      min: "堕落", max: "無垢" },
+                habituation: { name: "慣れ",      min: "過敏", max: "麻痺" },
+                pace:        { name: "展開速度",  min: "停滞", max: "急進" },
+                length:      { name: "文章量",    min: "短文", max: "長文" },
+                memory:      { name: "記憶深度",  min: "短期", max: "長期" },
+                style:       { name: "描写",      min: "抽象", max: "具体" }
+            };
+
+            const scenario = reactive({
+                char: "名家の令嬢。銀髪ロングヘア。",
+                rel: "ユーザーは敵国の将校。私は尋問を受けている。",
+                sit: "薄暗い地下牢。",
+                me: "私", you: "あなた"
+            });
+
+            const scrollArea = ref(null);
+            const fileInput = ref(null);
+
+            // --- Computed ---
+            const bgGradient = computed(() => {
+                const heat = Math.max(0, (sliders.temp - 0.3) * 0.8);
+                const dark = Math.max(0, 1 - sliders.dist);
+                return `radial-gradient(circle at 50% 50%, 
+                        rgba(${200 * heat}, 0, ${50 * heat}, ${0.1 + heat * 0.2}) 0%, 
+                        rgba(0,0,0, ${0.5 + dark * 0.5}) 100%)`;
+            });
+
+            // --- Methods ---
+            const notify = (msg, type = 'info') => {
+                const id = Date.now();
+                toasts.value.push({ id, msg, type });
+                setTimeout(() => toasts.value = toasts.value.filter(t => t.id !== id), 3000);
+            };
+
+            const typeWriter = async (text) => {
+                isTyping.value = true;
+                displayedText.value = "";
+                // 高速タイピング演出
+                const chunk = 2; 
+                for (let i = 0; i < text.length; i += chunk) {
+                    displayedText.value += text.slice(i, i + chunk);
+                    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+                    await new Promise(r => setTimeout(r, 10));
+                }
+                isTyping.value = false;
+            };
+
+const handleDrop = (e) => {
+                e.preventDefault(); // ブラウザの挙動を阻止
+                isDragging.value = false; // 黒い画面を消す
+                const files = e.dataTransfer.files;
+                if (!files.length) return;
+
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    if (file.type.startsWith('image/')) {
+                        const reader = new FileReader();
+                        reader.onload = (evt) => { imageBase64.value = evt.target.result; notify("画像を読み込みました"); };
+                        reader.readAsDataURL(file);
+                    }
+                    // テキストファイルの読み込み
+                    else if (file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+                        const reader = new FileReader();
+                        reader.onload = (evt) => { importedText.value = evt.target.result; notify("テキストを読み込みました"); };
+                        reader.readAsText(file);
+                    }
+                }
+            };
+            
+            const clearText = () => { importedText.value = ""; };
+
+            const generate = async () => {
+                if (isProcessing.value) return;
+                isProcessing.value = true;
+                try {
+                    const res = await fetch('/api/interact', {
+                        method: 'POST',
+headers: { 
+    'Content-Type': 'application/json',
+    'X-User-API-Key': userApiKey.value.trim(),
+    'X-User-Model': userModelId.value.trim(),
+    'X-User-Provider': apiProvider.value,
+    'X-Custom-Url': customUrl.value.trim()
+},
+                        body: JSON.stringify({ 
+                            sliders, 
+                            scenario, 
+                            image_data: imageBase64.value,
+                            imported_text: importedText.value
+                        })
+                    });
+                    
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    
+                    const data = await res.json();
+                    status.model = data.model;
+                    status.count = data.log_count;
+                    if(data.usage) status.tokens = data.usage.total_tokens || 0;
+                    
+                    // 履歴更新
+                    const hRes = await fetch('/api/history');
+                    const hData = await hRes.json();
+                    history.value = hData.history;
+
+                    // 画像は一度送ったらクリア（コンテキストに残るため）
+                    imageBase64.value = null;
+
+                    await typeWriter(data.text);
+
+                } catch (e) {
+                    console.error(e);
+                    notify(`Error: ${e.message}`, 'error');
+                } finally {
+                    isProcessing.value = false;
+                }
+            };
+
+            const resetHistory = async () => {
+                if(!confirm("履歴をリセットしますか？")) return;
+                await fetch('/api/reset', { method: 'POST' });
+                history.value = [];
+                displayedText.value = "SYSTEM RESET COMPLETE.";
+                status.count = 0;
+                notify("履歴を消去しました");
+            };
+
+            const toggleHistory = async () => {
+                showFullHistory.value = !showFullHistory.value;
+                if(showFullHistory.value) {
+                    const res = await fetch('/api/history');
+                    const d = await res.json();
+                    history.value = d.history;
+                }
+            };
+
+            const updateConfig = async () => {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: appMode.value })
+                });
+            };
+
+            // 画像処理
+            const triggerImage = () => fileInput.value.click();
+            const handleImage = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                // 画像の場合
+                if (file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        imageBase64.value = evt.target.result;
+                        notify("画像を読み込みました");
+                    };
+                    reader.readAsDataURL(file);
+                }
+                // テキストの場合 (.txt, .md, .json 等)
+                else {
+                    // 拡張子チェックなどを簡易的に済ませて読み込む
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        importedText.value = evt.target.result;
+                        notify("テキストを読み込みました");
+                    };
+                    reader.readAsText(file);
+                }
+                
+                // 次回のために値をクリア
+                e.target.value = "";
+            };
+            const clearImage = () => { imageBase64.value = null; };
+
+            // 初期化
+onMounted(async () => {
+                // ブラウザがファイルを勝手に開くのを画面全体で禁止する
+                window.addEventListener('dragover', (e) => e.preventDefault(), false);
+                window.addEventListener('drop', (e) => e.preventDefault(), false);
+
+                // 画面内にファイルが入った時の処理
+                window.addEventListener('dragenter', () => { isDragging.value = true; }, false);
+
+                const res = await fetch('/api/history');
+                const d = await res.json();
+                history.value = d.history;
+                status.count = d.count;
+                if (d.history.length > 0) {
+                    displayedText.value = d.history[0].text;
+                }
+                
+                const saved = localStorage.getItem('rai_v2_state');
+                if(saved) {
+                    const p = JSON.parse(saved);
+                    Object.assign(sliders, p.sliders);
+                    Object.assign(scenario, p.scenario);
+                    userApiKey.value = p.userApiKey || "";
+                    userModelId.value = p.userModelId || "";
+                    apiProvider.value = p.apiProvider || "openrouter";
+                    customUrl.value = p.customUrl || "";
+                    appMode.value = p.appMode || "api";
+                }
+            });
+
+            // 自動保存
+            watch([sliders, scenario, userApiKey, userModelId, apiProvider, customUrl], () => {
+                localStorage.setItem('rai_v2_state', JSON.stringify({ 
+                    sliders, scenario, 
+                    userApiKey: userApiKey.value,
+                    userModelId: userModelId.value,
+                    apiProvider: apiProvider.value,
+                    customUrl: customUrl.value,
+                            appMode: appMode.value 
+                }));
+            });
+
+                        const clearLocalStorage = () => {
+                if (!confirm("現在の設定（スライダー、シナリオ）を削除して初期状態に戻しますか？\n※履歴は消えません。")) return;
+                localStorage.removeItem('rai_v2_state');
+                alert("設定を削除しました。ページをリロードします。");
+                location.reload();
+            };
+
+            return {
+                isProcessing, isTyping, displayedText, showSettings, showFullHistory, minimized,
+                sliders, scenario, status, history, toasts, bgGradient,
+                scrollArea, fileInput, imageBase64, appMode,sliderLabels,
+                generate, resetHistory, toggleHistory, updateConfig,
+                triggerImage, handleImage, clearImage,clearLocalStorage,userApiKey, userModelId, apiProvider, customUrl,isDragging, importedText, handleDrop, clearText,
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
